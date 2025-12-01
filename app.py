@@ -5,33 +5,33 @@ import tempfile
 import os
 from dotenv import load_dotenv
 
-# ==========================================================
-# CONFIGURAÇÃO
-# ==========================================================
-load_dotenv()
-if "OPENAI_API_KEY" in st.secrets:
-    os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
+# Config
+load_dotenv() # Carrega a key de um arquivo .env
 
-from langchain_community.document_loaders import PyPDFLoader
-from langchain_community.vectorstores import FAISS
-from langchain_openai import OpenAIEmbeddings, ChatOpenAI
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+# Site hosteado no Streamlit 
+if "OPENAI_API_KEY" in st.secrets: # Verifica se a key está na aba Secrets do Streamlit
+    os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"] # Define a key para uso no sistema
 
-# Removi o ícone da página para ficar o padrão do Streamlit
+from langchain_community.document_loaders import PyPDFLoader # Lê PDF
+from langchain_community.vectorstores import FAISS # DB vetorial 
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI # Tradutor de texto em número (DB Vetorial) e chatgpt
+from langchain_text_splitters import RecursiveCharacterTextSplitter # Separa textos grandes em partes
+
+# Nome da página
 st.set_page_config(page_title="Faraday Pilot", layout="wide")
 
-# ==========================================================
-# 1. BANCO DE DADOS (COM POVOAMENTO AUTOMÁTICO)
-# ==========================================================
-@st.cache_resource
+# Banco de dados
+
+@st.cache_resource # Conecta no banco uma única vez e guarda essa informação na memória
 def conectar_banco():
     # Conecta ao banco
-    conn = sqlite3.connect("lab_manager_v7.db", check_same_thread=False)
-    cursor = conn.cursor()
+    conn = sqlite3.connect("lab_manager_v7.db", check_same_thread=False) # Cria o arquivo .db
+    cursor = conn.cursor() # Lê e escreve no banco
     
-    # --- CRIAÇÃO DAS TABELAS ---
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS motores (
+    # Tabela motores
+    # Envia um comando que, caso não haja a seguinte tabela, cria uma tabela
+    cursor.execute(""" 
+    CREATE TABLE IF NOT EXISTS motores ( 
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         tag_nome TEXT,
         tensao_v REAL,
@@ -41,7 +41,9 @@ def conectar_banco():
         rpm INTEGER
     )
     """)
-    
+
+    # Tabela inversores
+    # Envia um comando que, caso não haja a seguinte tabela, cria uma tabela
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS inversores (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -53,6 +55,8 @@ def conectar_banco():
     )
     """)
     
+    # Tabela parametros
+    # Envia um comando que, caso não haja a seguinte tabela, cria uma tabela
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS parametros (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -66,28 +70,29 @@ def conectar_banco():
     )
     """)
     
-    # --- POVOAMENTO AUTOMÁTICO (SEED) ---
+    # Banco para testes
     # Verifica se a tabela de inversores está vazia
+    # Caso esteja, ele insere os seguintes dados para usos em testes
     cursor.execute("SELECT count(*) FROM inversores")
     if cursor.fetchone()[0] == 0:
         print("Banco vazio detectado. Inserindo dados de exemplo...")
         
-        # LISTA DE INVERSORES (DADOS REAIS TÉCNICOS)
+        # Lista de Inversores
         lista_inversores = [
-            # WEG (Linha CFW)
+            # WEG 
             ('WEG', 'CFW500', 2.6, 1.0, '220V'),
             ('WEG', 'CFW500', 4.3, 1.5, '220V'),
             ('WEG', 'CFW11', 10.0, 5.0, '380V'),
             ('WEG', 'CFW11', 24.0, 15.0, '380V'),
             ('WEG', 'CFW11', 142.0, 100.0, '380V'), # Para teste de subdimensionamento
             
-            # Danfoss (Linha VLT)
+            # Danfoss 
             ('Danfoss', 'VLT Micro Drive FC 51', 2.2, 0.75, '220V'),
             ('Danfoss', 'VLT Micro Drive FC 51', 6.8, 2.0, '220V'),
             ('Danfoss', 'VLT AutomationDrive FC 302', 16.0, 10.0, '380V'),
             ('Danfoss', 'VLT AQUA Drive FC 202', 32.0, 20.0, '380V'),
             
-            # ABB (Linha ACS)
+            # ABB 
             ('ABB', 'ACS150', 4.7, 1.5, '220V'),
             ('ABB', 'ACS380', 5.6, 3.0, '380V'),
             ('ABB', 'ACS580', 17.0, 10.0, '380V'),
@@ -97,9 +102,9 @@ def conectar_banco():
         cursor.executemany("""
             INSERT INTO inversores (marca, modelo, corrente_nominal_a, potencia_cv, tensao_alimentacao)
             VALUES (?, ?, ?, ?, ?)
-        """, lista_inversores)
+        """, lista_inversores) # Insere os seguintes dados da lista inversores na tabela motores no db
         
-        # LISTA DE MOTORES (PARA TESTES)
+        # Lista de motores
         lista_motores = [
             ('Motor Bancada A (Pequeno)', 220, 2.8, 1.0, 4, 1720),
             ('Motor Bancada B (Médio)', 380, 7.5, 5.0, 4, 1750),
@@ -110,110 +115,122 @@ def conectar_banco():
         cursor.executemany("""
             INSERT INTO motores (tag_nome, tensao_v, corrente_a, potencia_cv, polos, rpm)
             VALUES (?, ?, ?, ?, ?, ?)
-        """, lista_motores)
-        
+        """, lista_motores) # Insere os seguintes dados da lista motores na tabela motores no db
+
+        # Salva no banco
         conn.commit()
     
+    # \re
     return conn
 
-# ==========================================================
-# 2. FUNÇÃO RAG (LEITURA DE PDF)
-# ==========================================================
-@st.cache_resource
+# RAG (Leitura dos PDFs)
+@st.cache_resource # Para ler o pdf uma única vez e guardar essa informação na memória 
 def processar_manual(arquivo_pdf):
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
-        tmp_file.write(arquivo_pdf.read())
-        tmp_path = tmp_file.name
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file: # Cria um PDF temporário
+        tmp_file.write(arquivo_pdf.read()) # Escreve o conteudo do upload (manual enviado) e no arquivo temporário
+        tmp_path = tmp_file.name # Salva o caminho do arquivo para usarmos no PyPDFLoader
 
-    loader = PyPDFLoader(tmp_path)
-    docs = loader.load()
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1500, chunk_overlap=300)
-    splits = text_splitter.split_documents(docs)
+    loader = PyPDFLoader(tmp_path) # Lê o arquivo no tmp_path
+    docs = loader.load() # Abre o arquivo, extrai todo o texto e transforma em paginas de strings 
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1500, chunk_overlap=300) # Chama a ferramenta e dimensiona o tamanho da chunk
+    splits = text_splitter.split_documents(docs) # Transformas a paginas em chunks menores
     
-    vectorstore = FAISS.from_documents(documents=splits, embedding=OpenAIEmbeddings())
-    os.remove(tmp_path)
-    return vectorstore
+    vectorstore = FAISS.from_documents(documents=splits, embedding=OpenAIEmbeddings()) # Traduz essas chunks de strings em vetores númericos e armazena no banco (FAISS)
+    os.remove(tmp_path) # Exclui o arquivo temporario
+    return vectorstore # Retorna o banco de vetores
 
-# ==========================================================
-# 3. INTERFACE
-# ==========================================================
-conn = conectar_banco()
+# Interface
+conn = conectar_banco() 
 cursor = conn.cursor()
 
 st.title("Faraday Pilot: Assistente de Parametrização")
 
-# Abas limpas (sem ícones)
+# Abas
 tab1, tab2, tab_ia = st.tabs(["Cadastro Hardware", "Estoque Cadastrado", "IA Parametrizadora"])
 
-# --- TAB 1: CADASTRO ---
+# Tabela 1 - Cadastro de motores e inversores
 with tab1:
-    c1, c2 = st.columns(2)
+    c1, c2 = st.columns(2) # Cria duas colunas, uma para motores e outra para inversores
     
-    # FORMULÁRIO MOTOR
+    # Aba motor
     with c1:
         st.subheader("Novo Motor")
-        with st.form("fm_motor", clear_on_submit=True):
-            tag = st.text_input("Tag / Nome", placeholder="Ex: Motor Bancada A")
+        # Forms motor
+        with st.form("fm_motor", clear_on_submit=True): # Evita com que a pagina atualize a cada interação e, ao salvar, apaga o que está inscrito em todos os campos
+            tag = st.text_input("Tag / Nome", placeholder="Ex: Motor Bancada A") # Nome do motor
+            # Cria duas colunas
             col_a, col_b = st.columns(2)
-            cv = col_a.number_input("Potência (CV)", min_value=0.1, step=0.1)
-            volts = col_b.number_input("Tensão (V)", value=380)
-            amps = col_a.number_input("Corrente (A)", min_value=0.1, step=0.1)
-            rpm = col_b.number_input("Rotação (RPM)", value=1750)
-            polos = st.selectbox("Polos", [2, 4, 6, 8], index=1)
+            cv = col_a.number_input("Potência (CV)", min_value=0.1, step=0.1) # Potência do motor
+            volts = col_b.number_input("Tensão (V)", value=380) # Tensão do motor
+            amps = col_a.number_input("Corrente (A)", min_value=0.1, step=0.1) # Corrente do motor
+            rpm = col_b.number_input("Rotação (RPM)", value=1750) # RPM do motor
+            polos = st.selectbox("Polos", [2, 4, 6, 8], index=1) # Polos do motor
             
+            # Cria um botão para salvar o forms
             if st.form_submit_button("Salvar Motor"):
+                #Executa a entrada de dados do motor na tabela motores
                 cursor.execute("""
                     INSERT INTO motores (tag_nome, tensao_v, corrente_a, potencia_cv, polos, rpm) 
                     VALUES (?,?,?,?,?,?)""", (tag, volts, amps, cv, polos, rpm))
+                # Salva os dados enviados na tabela
                 conn.commit()
                 st.success("Motor cadastrado com sucesso!")
 
-    # FORMULÁRIO INVERSOR
+    # Aba inversor
     with c2:
         st.subheader("Novo Inversor")
-        with st.form("fm_inversor", clear_on_submit=True):
-            marca = st.text_input("Marca", placeholder="WEG")
-            mod = st.text_input("Modelo", placeholder="CFW11")
+        # Forms inversor
+        with st.form("fm_inversor", clear_on_submit=True): # Evita com que a pagina atualize a cada interação e, ao salvar, apaga o que está inscrito em todos os campos
+            marca = st.text_input("Marca", placeholder="WEG") # Marca do inversor
+            mod = st.text_input("Modelo", placeholder="CFW11") # Modelo do inversor
+            # Cria duas colunas
+            ci1, ci2 = st.columns(2) 
+            imax = ci1.number_input("Corrente Nominal (A)", min_value=1.0, step=0.1) # Corrente do inversor
+            pot_inv = ci2.number_input("Potência Máxima (CV)", min_value=0.1, step=0.1) # Potência do inversor
+            tensao_in = st.selectbox("Alimentação", ["220V", "380V", "440V"], index=1) # Tensão do inversor
             
-            ci1, ci2 = st.columns(2)
-            imax = ci1.number_input("Corrente Nominal (A)", min_value=1.0, step=0.1)
-            pot_inv = ci2.number_input("Potência Máxima (CV)", min_value=0.1, step=0.1)
-            tensao_in = st.selectbox("Alimentação", ["220V", "380V", "440V"], index=1)
-            
+            # Cria um botão para salvar o forms
             if st.form_submit_button("Salvar Inversor"):
+                # Exexcuta a entrada de dados do inversor na tabela inversores
                 cursor.execute("""
                     INSERT INTO inversores (marca, modelo, corrente_nominal_a, potencia_cv, tensao_alimentacao) 
                     VALUES (?,?,?,?,?)""", (marca, mod, imax, pot_inv, tensao_in))
+                # Salva os dados enviados na tabela
                 conn.commit()
                 st.success("Inversor cadastrado!")
 
-# --- TAB 2: ESTOQUE ---
+# Tabela 2 - estoque
 with tab2:
     st.header("Inventário de Equipamentos")
     st.markdown("Abaixo estão listados todos os equipamentos disponíveis para teste.")
     
+    # Cria duas colunas
     col_mot, col_inv = st.columns(2)
     
     with col_mot:
         st.subheader("Motores")
-        df_m = pd.read_sql("SELECT * FROM motores", conn)
+        df_m = pd.read_sql("SELECT * FROM motores", conn) # Lê e e transforma o conteúdo em um dataframe
+        # Mostra a tabela (dataframe) dos motores cadastrados
         if not df_m.empty:
             st.dataframe(df_m, use_container_width=True, hide_index=True)
+        # Caso esteja vazio, exibe essa mensagem
         else:
             st.info("Nenhum motor cadastrado ainda.")
 
     with col_inv:
         st.subheader("Inversores")
-        df_i = pd.read_sql("SELECT * FROM inversores", conn)
+        df_i = pd.read_sql("SELECT * FROM inversores", conn) # Lê e transforma o conteúdo em um dataframe
+        # Mostra a tabela (dataframe) dos inversores cadastrados
         if not df_i.empty:
             st.dataframe(df_i, use_container_width=True, hide_index=True)
+        # Caso esteja vazio, exibe essa mensagem
         else:
             st.info("Nenhum inversor cadastrado ainda.")
             
     st.divider()
     st.caption("Nota: Para atualizar as tabelas após um cadastro, basta clicar na aba novamente ou recarregar a página.")
 
-# --- TAB 3: O CÉREBRO (IA) ---
+# tabela 3 - Análise de manuai e cruzamento de dados
 with tab_ia:
     st.header("Análise Inteligente de Manual")
     
@@ -235,7 +252,7 @@ with tab_ia:
         
         teste_a_vazio = st.checkbox("Modo Teste A VAZIO (Subdimensionamento Permitido)", value=True)
         
-        # LÓGICA DE CÁLCULO
+        # Logica do calculo
         alvo_corrente = mot_real['corrente_a']
         alvo_potencia = mot_real['potencia_cv']
         alvo_tensao = mot_real['tensao_v']
